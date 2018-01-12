@@ -85,10 +85,7 @@ class AdaptiveLoss(nn.Module):
         super().__init__()
 
         self.cutoff = cutoff
-        self.criterions = nn.ModuleList()
-
-        for i in self.cutoff:
-            self.criterions.append(nn.CrossEntropyLoss(size_average=False))
+        self.criterion = nn.ModuleList()
 
     def remap_target(self, target):
         new_target = [target.clone()]
@@ -112,11 +109,8 @@ class AdaptiveLoss(nn.Module):
         output = 0.0
 
         for i in range(len(input)):
-            if i is not None:
+            if input[i] is not None:
                 assert(target[i].min() >= 0 and target[i].max() <= input[i].size(1))
-                criterion = self.criterions[i]
-                output += criterion(input[i], Variable(target[i]))
+                output += self.criterion(input[i], Variable(target[i]))
 
         output /= batch_size
-
-        return output

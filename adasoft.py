@@ -1,11 +1,36 @@
 import torch
 from torch import nn
-from torch.autograd import Variable
+from torch.nn import functional as F
 
-from math import sqrt
 
 class AdaptiveSoftmax(nn.Module):
-    def __init__(self, input_size, cutoff):
+    """Adaptive Softmax output layer
+
+    Args:
+        input_size: size of each input sample
+        cutoff: indexes of words that splited into each bucket
+        reduce_factor: dimension reduction factor of each tail bucket before projected
+            to each words. Default: 4
+
+    Shape:
+        - input: (N, input_size)
+        - target: (N)
+        - output: [(N, cutoff[0] + len(cutoff) - 1), (N_1, cutoff[1] - cutoff[0]), ...]
+
+    Attributes:
+        head: the learnable weights of the module for head bucket
+        tail: the learnable weights of the module for tail buckets
+
+    Examples::
+
+        >>> m = AdaptiveSoftmax(20, [2000, 10000])
+        >>> input = torch.randn(128, 20)
+        >>> target = torch.randint(low=0, high=10000, size=[128])
+        >>> output = m(input, target)
+        >>> log_prob = m.log_prob(input)
+    """
+
+    def __init__(self, input_size, cutoff, reduce_factor=4):
         super().__init__()
 
         self.input_size = input_size
@@ -16,24 +41,18 @@ class AdaptiveSoftmax(nn.Module):
         self.tail = nn.ModuleList()
 
         for i in range(len(cutoff) - 1):
-            seq = nn.Sequential(
-                nn.Linear(input_size, input_size // 4 ** i, False),
-                nn.Linear(input_size // 4 ** i, cutoff[i + 1] - cutoff[i], False)
-            )
+            if reduce_factor == 1:
+                seq = nn.Linear(input_size, cutoff[i + 1] - cutoff[i])
+
+            else:
+                seq = nn.Sequential(
+                    nn.Linear(input_size, input_size // reduce_factor ** i, False),
+                    nn.Linear(
+                        input_size // reduce_factor ** i, cutoff[i + 1] - cutoff[i]
+                    ),
+                )
 
             self.tail.append(seq)
-
-    def reset(self):
-        std = 0.1
-
-        #self.head.weight.data.uniform_(-std, std)
-        nn.init.xavier_normal(self.head.weight)
-
-        for tail in self.tail:
-            nn.init.xavier_normal(tail[0].weight)
-            nn.init.xavier_normal(tail[1].weight)
-            #tail[0].weight.data.uniform_(-std, std)
-            #tail[1].weight.data.uniform_(-std, std)
 
     def set_target(self, target):
         self.id = []
@@ -42,13 +61,16 @@ class AdaptiveSoftmax(nn.Module):
             mask = target.ge(self.cutoff[i]).mul(target.lt(self.cutoff[i + 1]))
 
             if mask.sum() > 0:
-                self.id.append(Variable(mask.float().nonzero().squeeze(1)))
+                self.id.append(mask.float().nonzero().squeeze(1))
 
             else:
                 self.id.append(None)
 
-    def forward(self, input):
+    def forward(self, input, target=None):
         output = [self.head(input)]
+
+        if target is not None:
+            self.set_target(target)
 
         for i in range(len(self.id)):
             if self.id[i] is not None:
@@ -60,32 +82,138 @@ class AdaptiveSoftmax(nn.Module):
         return output
 
     def log_prob(self, input):
-        lsm = nn.LogSoftmax().cuda()
+        with torch.no_grad():
+            head_out = self.head(input)
 
-        head_out = self.head(input)
+            batch_size = head_out.size(0)
+            prob = torch.empty(batch_size, self.cutoff[-1], device=input.device)
 
-        batch_size = head_out.size(0)
-        prob = torch.zeros(batch_size, self.cutoff[-1]).cuda()
+            lsm_head = F.log_softmax(head_out, 1)
+            prob[:, : self.cutoff[0]].copy_(lsm_head[:, : self.cutoff[0]])
 
-        lsm_head = lsm(head_out)
-        prob.narrow(1, 0, self.output_size).add_(lsm_head.narrow(1, 0, self.output_size).data)
-
-        for i in range(len(self.tail)):
-            pos = self.cutoff[i]
-            i_size = self.cutoff[i + 1] - pos
-            buffer = lsm_head.narrow(1, self.cutoff[0] + i, 1)
-            buffer = buffer.expand(batch_size, i_size)
-            lsm_tail = lsm(self.tail[i](input))
-            prob.narrow(1, pos, i_size).copy_(buffer.data).add_(lsm_tail.data)
+            for i in range(len(self.tail)):
+                split = lsm_head[:, self.cutoff[0] + i].unsqueeze(1)
+                lsm_tail = F.log_softmax(self.tail[i](input), 1)
+                prob[:, self.cutoff[i] : self.cutoff[i + 1]].copy_(lsm_tail).add_(split)
 
         return prob
 
+
+class TiedAdaptiveSoftmax(nn.Module):
+    """Adaptive Softmax that supports weight tying
+
+    Args:
+        weight: weight tensor for each words of shape [num_words, dim]
+        cutoff: indexes of words that splited into each bucket
+
+    Shape:
+        - input: (N, input_size)
+        - output: [(N, cutoff[0] + len(cutoff) - 1), (N_1, cutoff[1] - cutoff[0]), ...]
+
+    Attributes:
+        weight: the learnable weights of the module that tied with specified tensor
+        biases: the learnable biases of the module
+
+    Examples::
+
+        >>> m = TiedAdaptiveSoftmax(20, [2000, 10000])
+        >>> input = torch.randn(128, 20)
+        >>> target = torch.randint(low=0, high=10000, size=[128])
+        >>> output = m(input, target)
+        >>> log_prob = m.log_prob(input)
+    """
+
+    def __init__(self, weight, cutoff):
+        super().__init__()
+
+        self.weight = weight
+        self.biases = nn.ParameterList()
+        self.biases.append(nn.Parameter(torch.zeros(cutoff[0])))
+        for i in range(len(cutoff) - 1):
+            self.biases.append(nn.Parameter(torch.zeros(cutoff[i + 1] - cutoff[i])))
+
+        self.split = nn.Linear(weight.shape[1], len(cutoff) - 1)
+        self.cutoff = cutoff
+
+    def set_target(self, target):
+        self.id = []
+
+        for i in range(len(self.cutoff) - 1):
+            mask = target.ge(self.cutoff[i]).mul(target.lt(self.cutoff[i + 1]))
+
+            if mask.sum() > 0:
+                self.id.append(mask.float().nonzero().squeeze(1))
+
+            else:
+                self.id.append(None)
+
+    def forward(self, input, target=None):
+        head = F.linear(input, self.weight[: self.cutoff[0]], self.biases[0])
+        split = self.split(input)
+        output = [torch.cat([head, split], 1)]
+
+        if target is not None:
+            self.set_target(target)
+
+        for i in range(len(self.id)):
+            if self.id[i] is not None:
+                output.append(
+                    F.linear(
+                        input.index_select(0, self.id[i]),
+                        self.weight[self.cutoff[i] : self.cutoff[i + 1]],
+                        self.biases[i + 1],
+                    )
+                )
+            else:
+                output.append(None)
+
+        return output
+
+    def log_prob(self, input):
+        with torch.no_grad():
+            linear_out = F.linear(
+                input, self.weight, torch.cat([p for p in self.biases])
+            )
+            split = self.split(input)
+            head = F.log_softmax(
+                torch.cat([linear_out[:, : self.cutoff[0]], split], 1), 1
+            )
+            linear_out[:, : self.cutoff[0]].copy_(head[:, : -split.shape[1]])
+
+            for i in range(len(self.cutoff) - 1):
+                part = linear_out[:, self.cutoff[i] : self.cutoff[i + 1]]
+                part.copy_(F.log_softmax(part, 1))
+                part.add_(head[:, self.cutoff[0] + i].unsqueeze(1))
+
+        return linear_out
+
+
 class AdaptiveLoss(nn.Module):
+    """Loss layer for Adaptive Softmax
+
+    Args:
+        cutoff: indexes of words that splited into each bucket
+
+    Shape:
+        - input: [(N, cutoff[0] + len(cutoff) - 1), (N_1, cutoff[1] - cutoff[0]), ...]
+        - target: (N)
+
+    Examples::
+
+        >>> cutoff = [2000, 10000]
+        >>> m = AdaptiveSoftmax(20, cutoff)
+        >>> criterion = AdaptiveLoss(cutoff)
+        >>> input = torch.randn(128, 20)
+        >>> target = torch.randint(low=0, high=10000, size=[128])
+        >>> output = m(input, target)
+        >>> loss = criterion(output, target)
+        >>> loss.backward()
+    """
+
     def __init__(self, cutoff):
         super().__init__()
 
         self.cutoff = cutoff
-        self.criterion = nn.CrossEntropyLoss(size_average=False)
 
     def remap_target(self, target):
         new_target = [target.clone()]
@@ -110,8 +238,10 @@ class AdaptiveLoss(nn.Module):
 
         for i in range(len(input)):
             if input[i] is not None:
-                assert(target[i].min() >= 0 and target[i].max() <= input[i].size(1))
-                output += self.criterion(input[i], Variable(target[i]))
+                assert target[i].min() >= 0 and target[i].max() <= input[i].size(1)
+                output = output + F.cross_entropy(
+                    input[i], target[i], size_average=False
+                )
 
         output /= batch_size
 

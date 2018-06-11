@@ -60,7 +60,7 @@ class AdaptiveSoftmax(nn.Module):
         for i in range(len(self.cutoff) - 1):
             mask = target.ge(self.cutoff[i]).mul(target.lt(self.cutoff[i + 1]))
 
-            if mask.sum() > 0:
+            if mask.any():
                 self.id.append(mask.float().nonzero().squeeze(1))
 
             else:
@@ -141,7 +141,7 @@ class TiedAdaptiveSoftmax(nn.Module):
         for i in range(len(self.cutoff) - 1):
             mask = target.ge(self.cutoff[i]).mul(target.lt(self.cutoff[i + 1]))
 
-            if mask.sum() > 0:
+            if mask.any():
                 self.id.append(mask.float().nonzero().squeeze(1))
 
             else:
@@ -222,7 +222,7 @@ class AdaptiveLoss(nn.Module):
             mask = target.ge(self.cutoff[i]).mul(target.lt(self.cutoff[i + 1]))
             new_target[0][mask] = self.cutoff[0] + i
 
-            if mask.sum() > 0:
+            if mask.any():
                 new_target.append(target[mask].add(-self.cutoff[i]))
 
             else:

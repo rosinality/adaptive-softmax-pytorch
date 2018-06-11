@@ -20,4 +20,4 @@ or you can train with regular softmax:
 python text8.py --model=linear
 ```
 
-I got similar perplexity to regular softmax with adaptive softmax with about 3x speed up. Currently I couldn't get exact number in the paper, though. (147 vs 151)
+I got similar perplexity to regular softmax with adaptive softmax with about 3x speed up. adaptive softmax itself is about 5.6x faster than regular softmax.

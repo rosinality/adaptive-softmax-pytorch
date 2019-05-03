@@ -25,8 +25,8 @@ with open('text8.train.pkl', 'rb') as f:
     data = pickle.load(f)
 
 def repackage_hidden(h):
-    if type(h) == Variable:
-        return Variable(h.data)
+    if isinstance(h, torch.Tensor):
+        return h.detach()
 
     else:
         return tuple(repackage_hidden(v) for v in h)

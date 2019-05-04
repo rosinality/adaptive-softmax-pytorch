@@ -12,7 +12,6 @@ import tqdm
 from model import LanguageModel
 
 from adasoft import *
-from torch.autograd import Variable
 
 parser = argparse.ArgumentParser(description='Benchmark for Adaptive Softmax')
 parser.add_argument('--model', type=str, default='adasoft',
@@ -71,15 +70,15 @@ def train():
     for X_batch, Y_batch in pbar:
         X_tensor = torch.from_numpy(X_batch).cuda()
         Y_tensor = torch.from_numpy(Y_batch.astype(np.int)).cuda()
-        X_var, Y_var = Variable(X_tensor), Variable(Y_tensor.view(-1))
+        Y_tensor = Y_tensor.view(-1)
         hidden = repackage_hidden(hidden)
         model.zero_grad()
-        output, hidden = model(X_var, hidden, Y_var)
-        loss = criterion(output, Y_var)
+        output, hidden = model(X_tensor, hidden, Y_tensor)
+        loss = criterion(output, Y_tensor)
         loss.backward()
         clip_global_norm(model, 0.25)
         optimizer.step()
-        pbar.set_description('Loss: {:.3f}'.format(loss.data[0]))
+        pbar.set_description('Loss: {:.3f}'.format(loss.item()))
 
 def test():
     pbar = tqdm.tqdm(zip(test_data['input'], test_data['label']))
@@ -96,16 +95,16 @@ def test():
     for X_batch, Y_batch in pbar:
         X_tensor = torch.from_numpy(X_batch).cuda()
         Y_tensor = torch.from_numpy(Y_batch.astype(np.int)).cuda()
-        X_var, Y_var = Variable(X_tensor), Variable(Y_tensor.view(-1))
+        Y_tensor = Y_tensor.view(-1)
         hidden = repackage_hidden(hidden)
 
         if adasoft:
-            output, hidden = model.log_prob(X_var, hidden, Y_var)
-            nllloss += criterion(Variable(output), Y_var).data[0]
+            output, hidden = model.log_prob(X_tensor, hidden, Y_tensor)
+            nllloss += criterion(output, Y_tensor).item()
 
         else:
-            output, hidden = model(X_var, hidden, Y_var, training=False)
-            nllloss += criterion(output, Y_var).data[0]
+            output, hidden = model(X_tensor, hidden, Y_tensor, training=False)
+            nllloss += criterion(output, Y_tensor).item()
 
 
     loss = nllloss / (len(test_data['input']) * 128 * 20)

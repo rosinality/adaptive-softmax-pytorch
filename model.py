@@ -57,7 +57,7 @@ class LanguageModel(nn.Module):
     def init_hidden(self, batch_size):
         weight = next(self.parameters()).data
 
-        return (Variable(weight.new(self.n_layer,
-                    batch_size, self.n_hidden).zero_()),
-                Variable(weight.new(self.n_layer,
-                    batch_size, self.n_hidden).zero_()))
+        return (weight.new(self.n_layer,
+                    batch_size, self.n_hidden).zero_(),
+                weight.new(self.n_layer,
+                    batch_size, self.n_hidden).zero_())
